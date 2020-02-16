@@ -18,16 +18,6 @@ MediaControl pauseControl = MediaControl(
   label: 'Pause',
   action: MediaAction.pause,
 );
-MediaControl skipToNextControl = MediaControl(
-  androidIcon: 'drawable/ic_action_skip_next',
-  label: 'Next',
-  action: MediaAction.skipToNext,
-);
-MediaControl skipToPreviousControl = MediaControl(
-  androidIcon: 'drawable/ic_action_skip_previous',
-  label: 'Previous',
-  action: MediaAction.skipToPrevious,
-);
 MediaControl stopControl = MediaControl(
   androidIcon: 'drawable/ic_action_stop',
   label: 'Stop',
@@ -72,9 +62,27 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         break;
     }
   }
+    void startPlayer() {
+    AudioService.start(
+      backgroundTaskEntrypoint: audioPlayerTaskEntrypoint,
+      androidNotificationChannelName: 'Music Player',
+      notificationColor: 0xFF2196f3,
+      androidNotificationIcon: "mipmap/ic_launcher",
+    );
+  }
+
+    void playPausePlayer(basicState) {
+    print(basicState.toString());
+    if (basicState == BasicPlaybackState.playing) {
+      AudioService.pause();
+    } else if (basicState == BasicPlaybackState.paused) {
+      AudioService.play();
+    }
+  }
 
   void connect() async {
     await AudioService.connect();
+    startPlayer();
   }
 
   void disconnect() {
@@ -94,44 +102,14 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
             title: const Text('Audio Service Demo'),
           ),
           body: new Center(
-            child: StreamBuilder<ScreenState>(
-              stream: Rx.combineLatest3<List<MediaItem>, MediaItem,
-                      PlaybackState, ScreenState>(
-                  AudioService.queueStream,
-                  AudioService.currentMediaItemStream,
-                  AudioService.playbackStateStream,
-                  (queue, mediaItem, playbackState) =>
-                      ScreenState(queue, mediaItem, playbackState)),
+            child: StreamBuilder<PlaybackState>(
+              stream: AudioService.playbackStateStream,
               builder: (context, snapshot) {
-                final screenState = snapshot.data;
-                final queue = screenState?.queue;
-                final mediaItem = screenState?.mediaItem;
-                final state = screenState?.playbackState;
+                final state = snapshot.data;
                 final basicState = state?.basicState ?? BasicPlaybackState.none;
                 return Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    if (queue != null && queue.isNotEmpty)
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          IconButton(
-                            icon: Icon(Icons.skip_previous),
-                            iconSize: 64.0,
-                            onPressed: mediaItem == queue.first
-                                ? null
-                                : AudioService.skipToPrevious,
-                          ),
-                          IconButton(
-                            icon: Icon(Icons.skip_next),
-                            iconSize: 64.0,
-                            onPressed: mediaItem == queue.last
-                                ? null
-                                : AudioService.skipToNext,
-                          ),
-                        ],
-                      ),
-                    if (mediaItem?.title != null) Text(mediaItem.title),
                     if (basicState == BasicPlaybackState.none) ...[
                       audioPlayerButton(),
                       textToSpeechButton(),
@@ -160,7 +138,6 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
                       ),
                     if (basicState != BasicPlaybackState.none &&
                         basicState != BasicPlaybackState.stopped) ...[
-                      positionIndicator(mediaItem, state),
                       Text("State: " +
                           "$basicState".replaceAll(RegExp(r'^.*\.'), '')),
                     ]
@@ -178,7 +155,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
         'AudioPlayer',
         () {
           AudioService.start(
-            backgroundTaskEntrypoint: _audioPlayerTaskEntrypoint,
+            backgroundTaskEntrypoint: audioPlayerTaskEntrypoint,
             androidNotificationChannelName: 'Audio Service Demo',
             notificationColor: 0xFF2196f3,
             androidNotificationIcon: 'mipmap/ic_launcher',
@@ -263,50 +240,13 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   }
 }
 
-class ScreenState {
-  final List<MediaItem> queue;
-  final MediaItem mediaItem;
-  final PlaybackState playbackState;
-
-  ScreenState(this.queue, this.mediaItem, this.playbackState);
-}
-
-void _audioPlayerTaskEntrypoint() async {
+void audioPlayerTaskEntrypoint() async {
   AudioServiceBackground.run(() => AudioPlayerTask());
 }
 
 class AudioPlayerTask extends BackgroundAudioTask {
-  final _queue = <MediaItem>[
-    MediaItem(
-      id: "https://s3.amazonaws.com/scifri-episodes/scifri20181123-episode.mp3",
-      album: "Science Friday",
-      title: "A Salute To Head-Scratching Science",
-      artist: "Science Friday and WNYC Studios",
-      duration: 5739820,
-      artUri:
-          "https://media.wnyc.org/i/1400/1400/l/80/1/ScienceFriday_WNYCStudios_1400.jpg",
-    ),
-    MediaItem(
-      id: "https://s3.amazonaws.com/scifri-segments/scifri201711241.mp3",
-      album: "Science Friday",
-      title: "From Cat Rheology To Operatic Incompetence",
-      artist: "Science Friday and WNYC Studios",
-      duration: 2856950,
-      artUri:
-          "https://media.wnyc.org/i/1400/1400/l/80/1/ScienceFriday_WNYCStudios_1400.jpg",
-    ),
-  ];
-  int _queueIndex = -1;
-  AudioPlayer _audioPlayer = new AudioPlayer();
-  Completer _completer = Completer();
-  BasicPlaybackState _skipState;
+  AudioPlayer _player  = new AudioPlayer();
   bool _playing;
-
-  bool get hasNext => _queueIndex + 1 < _queue.length;
-
-  bool get hasPrevious => _queueIndex > 0;
-
-  MediaItem get mediaItem => _queue[_queueIndex];
 
   BasicPlaybackState _stateToBasicState(AudioPlaybackState state) {
     switch (state) {
@@ -321,7 +261,7 @@ class AudioPlayerTask extends BackgroundAudioTask {
       case AudioPlaybackState.buffering:
         return BasicPlaybackState.buffering;
       case AudioPlaybackState.connecting:
-        return _skipState ?? BasicPlaybackState.connecting;
+        return BasicPlaybackState.connecting;
       case AudioPlaybackState.completed:
         return BasicPlaybackState.stopped;
       default:
@@ -331,34 +271,16 @@ class AudioPlayerTask extends BackgroundAudioTask {
 
   @override
   Future<void> onStart() async {
-    var playerStateSubscription = _audioPlayer.playbackStateStream
-        .where((state) => state == AudioPlaybackState.completed)
-        .listen((state) {
-      _handlePlaybackCompleted();
-    });
-    var eventSubscription = _audioPlayer.playbackEventStream.listen((event) {
+    _player.playbackEventStream.listen((event) {
       final state = _stateToBasicState(event.state);
+      print('State in listener');
+      print(state);
       if (state != BasicPlaybackState.stopped) {
-        _setState(
-          state: state,
-          position: event.position.inMilliseconds,
-        );
+        _setState(state: state, position: 800);
       }
     });
 
-    AudioServiceBackground.setQueue(_queue);
-    await onSkipToNext();
-    await _completer.future;
-    playerStateSubscription.cancel();
-    eventSubscription.cancel();
-  }
-
-  void _handlePlaybackCompleted() {
-    if (hasNext) {
-      onSkipToNext();
-    } else {
-      onStop();
-    }
+    _player.setUrl("http://109.74.196.76:8021/stream");
   }
 
   void playPause() {
@@ -369,56 +291,15 @@ class AudioPlayerTask extends BackgroundAudioTask {
   }
 
   @override
-  Future<void> onSkipToNext() => _skip(1);
-
-  @override
-  Future<void> onSkipToPrevious() => _skip(-1);
-
-  Future<void> _skip(int offset) async {
-    final newPos = _queueIndex + offset;
-    if (!(newPos >= 0 && newPos < _queue.length)) return;
-    if (_playing == null) {
-      // First time, we want to start playing
-      _playing = true;
-    } else if (_playing) {
-      // Stop current item
-      await _audioPlayer.stop();
-    }
-    // Load next item
-    _queueIndex = newPos;
-    AudioServiceBackground.setMediaItem(mediaItem);
-    _skipState = offset > 0
-        ? BasicPlaybackState.skippingToNext
-        : BasicPlaybackState.skippingToPrevious;
-    await _audioPlayer.setUrl(mediaItem.id);
-    _skipState = null;
-    // Resume playback if we were playing
-    if (_playing) {
-      onPlay();
-    } else {
-      _setState(state: BasicPlaybackState.paused);
-    }
-  }
-
-  @override
   void onPlay() {
-    if (_skipState == null) {
       _playing = true;
-      _audioPlayer.play();
-    }
+      _player.play();
   }
 
   @override
   void onPause() {
-    if (_skipState == null) {
       _playing = false;
-      _audioPlayer.pause();
-    }
-  }
-
-  @override
-  void onSeekTo(int position) {
-    _audioPlayer.seek(Duration(milliseconds: position));
+      _player.pause();
   }
 
   @override
@@ -428,37 +309,30 @@ class AudioPlayerTask extends BackgroundAudioTask {
 
   @override
   void onStop() {
-    _audioPlayer.stop();
+    _player.stop();
     _setState(state: BasicPlaybackState.stopped);
-    _completer.complete();
   }
 
   void _setState({@required BasicPlaybackState state, int position}) {
     if (position == null) {
-      position = _audioPlayer.playbackEvent.position.inMilliseconds;
+      position = _player.playbackEvent.position.inMilliseconds;
     }
     AudioServiceBackground.setState(
-      controls: getControls(state),
-      systemActions: [MediaAction.seekTo],
+      controls: [],
       basicState: state,
-      position: position,
     );
   }
 
   List<MediaControl> getControls(BasicPlaybackState state) {
     if (_playing) {
       return [
-        skipToPreviousControl,
         pauseControl,
         stopControl,
-        skipToNextControl
       ];
     } else {
       return [
-        skipToPreviousControl,
         playControl,
         stopControl,
-        skipToNextControl
       ];
     }
   }
